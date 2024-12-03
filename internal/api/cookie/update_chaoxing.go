@@ -8,6 +8,7 @@ import (
 	"KazeFrame/pkg/util"
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -20,13 +21,13 @@ func ChaoxingUpdate(c *gin.Context) {
 		util.Rsp(c, 400, "请指定正确的更新方式all/new/day")
 		return
 	}
-	ctx := context.Background()
-	redisClient := config.GetRedis()
 	// 如果是新数据则不做redis检查每次都创建任务
 	if paramType == "new" {
 		cookieData, _ := dao.CkDataRepo.FindChaoxingTaskIds(paramType)
 		service.ConcurrentRenewalCookie(paramType, cookieData)
 	}
+	ctx := context.Background()
+	redisClient := config.GetRedis()
 	// 检查Redis中是否存在正在进行的任务
 	redisKey := fmt.Sprintf("%s%s:*", cache.ChaoxingTask, paramType)
 	keys, err := redisClient.Keys(ctx, redisKey).Result()
@@ -36,21 +37,32 @@ func ChaoxingUpdate(c *gin.Context) {
 	}
 	// 如果存在任务，则统计总数和完成数
 	if len(keys) > 0 {
+		var wg sync.WaitGroup
 		completedTaskCount := 0
 		failedTaskCount := 0
-		for _, key := range keys {
-			status, err := redisClient.Get(ctx, key).Result()
-			if err != nil && err != redis.Nil {
-				util.Rsp(c, 500, "获取Redis状态时发生错误: "+err.Error())
-				return
-			}
-			if status == "completed" {
-				completedTaskCount++
-			}
-			if status == "failed" {
-				failedTaskCount++
-			}
+		taskCount := len(keys)
+		if _, err := dao.CkDataRepo.FindChaoxingTaskIds(paramType); err != nil {
+			util.Rsp(c, 500, "服务端缓存服务错误: "+err.Error())
+			return
 		}
+		for _, key := range keys {
+			wg.Add(1)
+			go func(key string) {
+				defer wg.Done()
+				status, err := redisClient.Get(ctx, key).Result()
+				if err != nil && err != redis.Nil {
+					util.Rsp(c, 500, "获取Redis状态时发生错误: "+err.Error())
+					return
+				}
+				if status == "completed" {
+					completedTaskCount++
+				}
+				if status == "failed" {
+					failedTaskCount++
+				}
+			}(key)
+		}
+		wg.Wait()
 		bodyMessage := ""
 		var bodyCode int
 		if len(keys) == completedTaskCount || len(keys) == failedTaskCount+completedTaskCount {
@@ -63,7 +75,7 @@ func ChaoxingUpdate(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"code":            bodyCode,
 			"message":         bodyMessage,
-			"task_count":      len(keys),
+			"task_count":      taskCount,
 			"completed_count": completedTaskCount,
 			"failed_count":    failedTaskCount,
 		})
@@ -75,12 +87,10 @@ func ChaoxingUpdate(c *gin.Context) {
 			util.Rsp(c, 500, "服务端缓存服务错误: "+err.Error())
 			return
 		}
-		errors := service.ConcurrentRenewalCookie(paramType, cookieData)
-		if errors != nil {
-			util.Rsp(c, 200, "续期任务已开始, 但产生了错误: "+errors.Error())
-			return
-		} else {
-			c.JSON(200, gin.H{"code": 200, "message": "续期任务已开始, 一小时内请勿重复操作"})
-		}
+		c.JSON(200, gin.H{"code": 200, "message": "续期任务已开始, 一小时内请勿重复操作"})
+		// 异步执行续期任务
+		go func() {
+			service.ConcurrentRenewalCookie(paramType, cookieData)
+		}()
 	}
 }

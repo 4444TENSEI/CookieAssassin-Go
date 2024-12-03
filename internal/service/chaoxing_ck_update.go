@@ -80,17 +80,14 @@ func checkRenewalStatus(res *http.Response) (bool, error) {
 		return false, fmt.Errorf("response body is nil")
 	}
 	defer res.Body.Close()
-
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		return false, err
 	}
-
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return false, err
 	}
-
 	if result["result"] == float64(1) { // 注意：JSON unmarshal会将数字转换为float64
 		return true, nil
 	}
@@ -112,7 +109,6 @@ func sendReq(url, basicCookie string, cookies []ExtendedCookie) ([]ExtendedCooki
 		return nil, false, err
 	}
 	defer res.Body.Close()
-
 	setCookieHeaders := res.Header["Set-Cookie"]
 	for _, header := range setCookieHeaders {
 		cookie := parseSetCookieHeader(header)
@@ -128,12 +124,10 @@ func sendReq(url, basicCookie string, cookies []ExtendedCookie) ([]ExtendedCooki
 			cookies = append(cookies, cookie)
 		}
 	}
-
 	renewalStatus, err := checkRenewalStatus(res)
 	if err != nil {
 		return nil, false, err
 	}
-
 	return cookies, renewalStatus, nil
 }
 
@@ -143,16 +137,20 @@ func ConcurrentRenewalCookie(paramType string, dataList []dao.DataWithID) error 
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(dataList))
+	// 数据库连接并发数20
+	// 创建一个带缓冲的通道，限制数据库连接数
+	semaphore := make(chan struct{}, 20)
 	for _, data := range dataList {
 		wg.Add(1)
 		go func(id uint, data json.RawMessage) {
-			var cookies []ExtendedCookie
 			defer wg.Done()
+			semaphore <- struct{}{}        // 获取信号量
+			defer func() { <-semaphore }() // 释放信号量
 			redisKey := fmt.Sprintf("%s%s:%d", cache.ChaoxingTask, paramType, id)
 			if redisClient.Exists(ctx, redisKey).Val() > 0 {
 				return
 			}
-			// 产生错误的goroutine，也需要更新数据库update_status状态为“不可续期”
+			var cookies []ExtendedCookie
 			if err := json.Unmarshal(data, &cookies); err != nil {
 				updateList := map[string]interface{}{
 					"update_status": "无法解析",
@@ -180,7 +178,6 @@ func ConcurrentRenewalCookie(paramType string, dataList []dao.DataWithID) error 
 					break
 				}
 			}
-
 			if lastRenewalStatus {
 				cookiesJSON, _ := json.Marshal(cookies)
 				updateList := map[string]interface{}{
