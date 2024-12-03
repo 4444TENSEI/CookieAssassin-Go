@@ -2,25 +2,28 @@ package dao
 
 import "encoding/json"
 
-// 查询可以续期的id列表数据
-func (br *customRepo[T]) FindChaoxingList(chaoxingID string) ([]string, []string, error) {
-	var renewableIDs []string
-	var nonRenewableIDs []string
-	// 查找处于"续期中"状态的ID
+// 1.查询超星id下所有的cookie id
+func (br *customRepo[T]) FindChaoxingList(chaoxingID string) ([]string, error) {
+	var allIDs []string
 	if err := br.DB.Model(new(T)).
 		Select("id").
-		Where("chaoxing_id = ? AND update_status = ?", chaoxingID, "续期中").
-		Scan(&renewableIDs).Error; err != nil {
-		return nil, nil, err
+		Where("chaoxing_id = ?", chaoxingID).
+		Scan(&allIDs).Error; err != nil {
+		return nil, err
 	}
-	// 查找"不可续期"状态的ID
+	return allIDs, nil
+}
+
+// 2.传入id数组，返回“续期中”的数据切片
+func (br *customRepo[T]) FindRenewableDataByID(ids []string) ([]json.RawMessage, error) {
+	var dataSlice []json.RawMessage
 	if err := br.DB.Model(new(T)).
-		Select("id").
-		Where("chaoxing_id = ? AND (update_status = ? OR update_status IS NULL)", chaoxingID, "不可续期").
-		Scan(&nonRenewableIDs).Error; err != nil {
-		return nil, nil, err
+		Select("data").
+		Where("id IN (?) AND update_status = ?", ids, "续期中").
+		Scan(&dataSlice).Error; err != nil {
+		return nil, err
 	}
-	return renewableIDs, nonRenewableIDs, nil
+	return dataSlice, nil
 }
 
 type DataWithID struct {
